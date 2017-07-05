@@ -1,0 +1,313 @@
+//This code needs quite a bit of work to be cleaned up, but it works.
+//Please note, it is written for an Arduino Due.
+
+//IMPORTANT: LOGIC LEVEL SHIFTER NOT REQUIRED. DUE OPERATES ON 3.3V
+//IMPORTANT: THE ARDUNIO TX PIN NEEDS TO CONNECT TO THE ROCKBLOCK TXD PIN...ARDUINO RX PIN CONNECTS TO ROCKBLOCK RXD
+
+//Troubleshoot:
+//Including HDOP in the message causes 5.155 +SBDWT to error out
+
+//Active Features:
+//Use 5.120 +IPR to set baud rate to match GP-20U7 GPS reciever
+//Monitor signal strength with //5.94 +CSQ - Signal Quality, identify null returns
+//Change LED color based on signal strength
+//Display data recieved from GPS module
+//Press button to send canned message to SBD message buffer using 5.155 +SBDWT
+//After sending message to buffer, message will automatically tranmit to the Iridium netwotk using 5.144 +SBDIX
+
+//Planned Features:
+//Blink LED once message sent successfully, check if message sent using, 5.150 +SBDS - Short Burst Data: Status, or by the return message from 5.144 +SBDIX
+//Clear message buffer with 5.138 +SBDD - Short Burst Data: Clear SBD Message Buffer(s)
+//Send message with 5.142 +SBDI - Short Burst Data: Initiate an SBD Session
+//Check if message sent using, 5.150 +SBDS - Short Burst Data: Status or by the return message from 5.144 +SBDIX
+
+//In the ISU AT Command Reference, an 'n' after a command means that the specificed value goes in place of the 'n'
+//Ex: 'En' is defined as the command which sets the echo...if we send 'ATE0' echo is turned off...if we send 'ATE1' echo is turned on
+
+//This sketch uses a couple lines of code which are particularly useful for this application
+//The following loop will continue until we receive a response from the RockBLOCK
+//The smartdelay within the loop will allow us to feed the GPS object while we are waiting for the response
+//while(!Serial1.available())
+//    smartdelay(1000);
+
+static const uint32_t rockBaud = 19200; //Set RockBLOCK communication rate at 19200 baud
+
+#include <TinyGPS++.h> //Include TinyGPS++ library
+static const uint32_t GPSBaud = 9600; //Set GPS communication rate at 9600 baud
+TinyGPSPlus gps; //Define the TinyGPS++ object
+
+//Define pins for the RGB LED
+int RED_PIN = 2;
+int GREEN_PIN = 3;
+int BLUE_PIN = 4;
+
+//Define variables to track when the button was last pressed
+unsigned long button_time = 0;   
+unsigned long last_button_time = 0;
+volatile int count = 0;
+volatile int countCheck = 0;
+int buttonPin = 40;
+
+
+void setup()
+{
+  Serial.begin(rockBaud); //Set hardware serial communication rate to same as RockBLOCK in order to display to serial monitor
+  Serial1.begin(rockBaud); //Set RockBLOCK communication rate (RX pin 19 and TX pin 18 are defined as Serial1) 
+  commandATE0(); //5.177 En - Echo, from ISU AT Command Reference, '0' means the command will not be echoed
+  pinMode(RED_PIN, OUTPUT); //Configure pins for the RGB LED
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+  attachInterrupt(digitalPinToInterrupt(buttonPin), buttonCount, FALLING); //Establish the interupt function which will be accessed when the button is pressed
+  Serial3.begin(GPSBaud); //Set GPS communication rate through software serial (RX pin 15 and TX pin 14 are defined as Serial3, although we only use RX with the GP-20U7 GPS reciever) 
+  commandChangeBaud();//Update the communication rate on the RockBLOCK itself to match the GPS rate
+  Serial1.begin(GPSBaud); //Update the communication rate between the Arduino and RockBLOCK
+  Serial.begin(GPSBaud); //Update hardware serial communication rate
+  commandATE0(); //5.177 En - Echo, from ISU AT Command Reference, '0' means the command will not be echoed
+}
+
+
+void loop()
+{
+  commandCSQ(); //5.94 +CSQ - Signal Quality (Initial implementation)
+  Serial.println("-------------------");
+  Serial.println(""); Serial.println("");
+  if(countCheck != count) //Instead of running code within the interrupt, it only increments the variable 'count'. If 'count' has been incremented, then the desired code will run.
+  {
+    //commandSBDWT();
+    commandSBDWTgps();
+    commandSBDIX();
+  }
+  countCheck = count;
+  //gpsDisplay();
+  smartdelay(2000);
+}
+
+
+void commandATE0() //5.177 En - Echo
+{
+   Serial.println("Entering command: ATE0");
+   Serial1.print("ATE0"); //Send the command
+   Serial1.print("\r"); //Enter a carriage return
+   smartdelay(1500); //Include a delay to give the module time to respond
+   int rsplen = Serial1.available(); //Create a variable to store the LENGTH of the response from the RockBLOCK
+   char rsp[rsplen]; //Create an array to store RESPONSE from the RockBLOCK
+   for(int i=0; i<rsplen; i++) //Read the response in the buffer one byte at a time
+      rsp[i] = Serial1.read();
+   String rsps = rsp; //Store the response in a string so we can trim off any leading and trailing whitespace characters
+   rsps.trim(); //Trim off leading and trailing whitespace characters
+   Serial.print("Response: "); Serial.println(rsps); //Print out the response to the serial monitor
+}
+
+void commandChangeBaud()
+{
+  Serial.println("Entering command: AT+IPR=5");
+  Serial1.print("AT+IPR=5"); //Send the command to update the baud rate to 9600, which matches the GP-20U7 GPS module
+  Serial1.print("\r"); //Enter a carriage return
+  smartdelay(1500); //Include a delay to give the module time to respond
+  int rsplen = Serial1.available(); //Create a variable to store the LENGTH of the response from the RockBLOCK
+  char rsp[rsplen]; //Create an array to store RESPONSE from the RockBLOCK
+  for(int i=0; i<rsplen; i++) //Read the response in the buffer one byte at a time
+      rsp[i] = Serial1.read();
+  String rsps = rsp; //Store the response in a string so we can trim off any leading and trailing whitespace characters
+  rsps.trim(); //Trim off leading and trailing whitespace characters
+  Serial.print("Response: "); Serial.println(rsps); //Print out the response to the serial monitor
+}
+
+
+void commandCSQ() //5.94 +CSQ - Signal Quality
+{
+   Serial.println("Entering command: AT+CSQ");
+   Serial1.print("AT+CSQ"); //Send the command
+   Serial1.print("\r"); //Enter a carriage return
+   //smartdelay(11000); //Include a delay to give the module time to respond
+   while(!Serial1.available()) //Wait for a response from the RockBLOCK
+    smartdelay(1000);
+   int rsplen = Serial1.available(); //Create a variable to store the LENGTH of the response from the RockBLOCK
+   char rsp[rsplen]; //Create an array to store RESPONSE from the RockBLOCK
+   for(int i=0; i<rsplen; i++) //Read the response in the buffer one byte at a time
+      rsp[i] = Serial1.read();
+   String rsps = rsp; //Store the response in a string so we can trim off any leading and trailing whitespace characters
+   rsps.trim(); //Trim off leading and trailing whitespace characters
+   Serial.print("Signal Strength: "); Serial.println(rsps);
+   if(rsp[7] == '0') //RED
+   {
+    digitalWrite(RED_PIN, HIGH);
+    digitalWrite(GREEN_PIN, LOW);
+    digitalWrite(BLUE_PIN, LOW);
+   } 
+   else if(rsp[7] == '1') //YELLOW
+   {
+    digitalWrite(RED_PIN, HIGH);
+    digitalWrite(GREEN_PIN, HIGH);
+    digitalWrite(BLUE_PIN, LOW);
+   }
+   else if(rsp[7] == '2') //PURPLE
+   {
+    digitalWrite(RED_PIN, HIGH);
+    digitalWrite(GREEN_PIN, LOW);
+    digitalWrite(BLUE_PIN, HIGH);
+   }
+   else if(rsp[7] == '3') //CYAN
+   {
+    digitalWrite(RED_PIN, LOW);
+    digitalWrite(GREEN_PIN, HIGH);
+    digitalWrite(BLUE_PIN, HIGH);
+   }
+   else if(rsp[7] == '4') //BLUE
+   {
+    digitalWrite(RED_PIN, LOW);
+    digitalWrite(GREEN_PIN, LOW);
+    digitalWrite(BLUE_PIN, HIGH);
+   }
+   else if(rsp[7] == '5') //GREEN
+   {
+    digitalWrite(RED_PIN, LOW);
+    digitalWrite(GREEN_PIN, HIGH);
+    digitalWrite(BLUE_PIN, LOW);
+   }
+   else
+   {
+    Serial.println("Null Response"); //WHITE
+    digitalWrite(RED_PIN, HIGH);
+    digitalWrite(GREEN_PIN, HIGH);
+    digitalWrite(BLUE_PIN, HIGH);
+   }
+}
+
+
+void commandSBDWT() //5.155 +SBDWT - Short Burst Data: Write a Text Message to the ISU
+{
+  Serial.println("Entering command: AT+SBDWT With Message --Hello World!--");
+  Serial1.println("AT+SBDWT=Hello World!"); //Send the command
+  Serial1.print("I'm here!");
+  Serial1.print("\r"); //Enter a carriage return
+  //smartdelay(1500); //Include a delay to give the module time to respond
+  while(!Serial1.available()) //Wait for a response from the RockBLOCK
+    smartdelay(1000);
+  int rsplen = Serial1.available(); //Create a variable to store the LENGTH of the response from the RockBLOCK
+  char rsp[rsplen]; //Create an array to store RESPONSE from the RockBLOCK
+  for(int i=0; i<rsplen; i++) //Read the response in the buffer one byte at a time
+     rsp[i] = Serial1.read();
+  String rsps = rsp; //Store the response in a string so we can trim off any leading and trailing whitespace characters
+  rsps.trim(); //Trim off leading and trailing whitespace characters
+  Serial.print("Response: "); Serial.println(rsps); //Print out the response to the serial monitor
+  Serial.println("-------------------");
+  Serial.println(""); Serial.println("");
+}
+
+
+void commandSBDWTgps() //5.155 +SBDWT - Short Burst Data: Write a Text Message to the ISU
+{
+  //Print the GPS data to the serial monitor
+  Serial.println("Entering command: AT+SBDWT With Message:");
+  Serial.print("Lat/Long = "); Serial.print(gps.location.lat(), 6); Serial.print(", "); Serial.print(gps.location.lng(), 6); Serial.print(", Age: "); Serial.println(gps.location.age());
+  Serial.print("Altitude = "); Serial.print(gps.altitude.feet()); Serial.print(", Age: "); Serial.println(gps.altitude.age());
+  Serial.print("Time(UTC) = ");
+  char gpstime[32]; //This is the buffer for the string the sprintf outputs to
+  //The following line has 3 2-digit integers with leading zeros, separated by ":"
+  //The list of parameters, hour, min, sec, provides the numbers the sprintf prints out with.
+  sprintf(gpstime, "%02d:%02d:%02d ", gps.time.hour(), gps.time.minute(), gps.time.second());                                                        
+  Serial.println(gpstime);
+  Serial.print("Satellites = "); Serial.print(gps.satellites.value()); Serial.print(", Age: "); Serial.println(gps.satellites.age());
+  //See bottom of sketch  for explanation of HDOP
+  //Serial.print("HDOP = "); Serial.print(float (gps.hdop.value())/100); Serial.print(", Age: "); Serial.println(gps.hdop.age());
+  Serial.println("");
+  
+  //Print GPS data to the RockBLOCK buffer...This does not work
+  Serial1.print("AT+SBDWT="); //Send the command
+  Serial1.print("Lat/Long = "); Serial1.print(gps.location.lat(), 6); Serial1.print(", "); Serial1.print(gps.location.lng(), 6); Serial1.print(", Age: "); Serial1.print(gps.location.age());
+  Serial1.print('\n');
+  Serial1.print("Altitude = "); Serial1.print(gps.altitude.feet()); Serial1.print(", Age: "); Serial1.print(gps.altitude.age());
+  Serial1.print('\n');
+  Serial1.print(gpstime);
+  Serial1.print('\n');
+  Serial1.print("Satellites = "); Serial1.print(gps.satellites.value()); Serial1.print(", Age: "); Serial1.print(gps.satellites.age());
+  Serial1.print('\n');
+  char hdopVal[32];
+  sprintf(hdopVal, "%.2f", (gps.hdop.value())/100);
+  //Serial1.print("HDOP = "); Serial1.print(hdopVal); Serial1.print(", Age: "); Serial1.print(gps.hdop.age());
+  
+  Serial1.print("\r"); //Enter a carriage return
+  //smartdelay(1500); //Include a delay to give the module time to respond
+  while(!Serial1.available()) //Wait for a response from the RockBLOCK
+    smartdelay(1000);
+  int rsplen = Serial1.available(); //Create a variable to store the LENGTH of the response from the RockBLOCK
+  char rsp[rsplen]; //Create an array to store RESPONSE from the RockBLOCK
+  for(int i=0; i<rsplen; i++) //Read the response in the buffer one byte at a time
+     rsp[i] = Serial1.read();
+  String rsps = rsp; //Store the response in a string so we can trim off any leading and trailing whitespace characters
+  rsps.trim(); //Trim off leading and trailing whitespace characters
+  Serial.print("Response: "); Serial.println(rsps); //Print out the response to the serial monitor
+  Serial.println("-------------------");
+  Serial.println(""); Serial.println("");
+}
+
+
+void commandSBDIX() //5.144 +SBDIX - Short Burst Data: Initiate an SBD Session Extended
+{
+  Serial.println("Entering command: AT+SBDIX to send stored message");
+  Serial1.println("AT+SBDIX"); //Send the command
+  Serial1.print("\r"); //Enter a carriage return
+  while(!Serial1.available()); //Wait for a response from the RockBLOCK
+    smartdelay(1000);
+  int rsplen = Serial1.available(); //Create a variable to store the LENGTH of the response from the RockBLOCK
+  char rsp[rsplen]; //Create an array to store RESPONSE from the RockBLOCK
+  for(int i=0; i<rsplen; i++) //Read the response in the buffer one byte at a time
+     rsp[i] = Serial1.read();
+  String rsps = rsp; //Store the response in a string so we can trim off any leading and trailing whitespace characters
+  rsps.trim(); //Trim off leading and trailing whitespace characters
+  Serial.print("Response: "); Serial.println(rsps); //Print out the response to the serial monitor
+  Serial.println("-------------------");
+  Serial.println(""); Serial.println("");
+}
+
+
+void buttonCount()
+{
+  button_time = millis();
+  if (button_time - last_button_time > 250) //Check to see if buttonCount() was called in the last 250 milliseconds
+    count++;
+  last_button_time = button_time; //Reset the variable to when the interrupt was last used
+}
+
+
+void gpsDisplay()
+{
+  while (Serial3.available() > 0) //Feed the TinyGPS++ object serial NMEA data from the GPS receiver
+    gps.encode(Serial3.read());
+  Serial.print("GPS data updated? ");
+  Serial.println(gps.location.isUpdated() ? "YES!" : "No");
+  if (gps.location.isUpdated()) //Check whether the TinyGPS++ object’s value has been updated (not necessarily changed)                                                                 
+  {
+    Serial.print("Lat/Long = "); Serial.print(gps.location.lat(), 6); Serial.print(", "); Serial.print(gps.location.lng(), 6); Serial.print(", Age: "); Serial.println(gps.location.age());
+    Serial.print("Altitude = "); Serial.print(gps.altitude.feet()); Serial.print(", Age: "); Serial.println(gps.altitude.age());
+    
+    Serial.print("Time(UTC) = ");
+    char gpstime[32]; //This is the buffer for the string the sprintf outputs to
+    //The following line has 3 2-digit integers with leading zeros, separated by ":"
+    //The list of parameters, hour, min, sec, provides the numbers the sprintf prints out with.
+    sprintf(gpstime, "%02d:%02d:%02d ", gps.time.hour(), gps.time.minute(), gps.time.second());                                                        
+    Serial.println(gpstime);
+    
+    Serial.print("Satellites = "); Serial.print(gps.satellites.value()); Serial.print(", Age: "); Serial.println(gps.satellites.age());
+    //See bottom of sketch  for explanation of HDOP
+    Serial.print("HDOP = "); Serial.print(float (gps.hdop.value())/100); Serial.print(", Age: "); Serial.println(gps.hdop.age());
+    Serial.println("");
+  }
+  //“checksum failed” counter
+  Serial.print("NMEA sentences that failed checksum=");
+  Serial.println(gps.failedChecksum());
+  Serial.println("-------------------");
+  Serial.println(""); Serial.println("");
+}
+
+
+static void smartdelay(unsigned long ms)
+{
+  unsigned long start = millis();
+  do 
+  {
+    while (Serial3.available())
+      gps.encode(Serial3.read());
+  } while (millis() - start < ms);
+}
